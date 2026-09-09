@@ -1,8 +1,9 @@
-# The `did:bio` DID Method Specification v1.0
+# The `did:bio` DID Method Specification v1.1
 
 **A W3C DID 1.0 conformant DID method for biological research data, anchored on the Solana blockchain.**
 
 - Latest editor's draft: this document
+- Changes since v1.0: key buffers for verification keys larger than one transaction (Section 6.3)
 - Conforms to: [Decentralized Identifiers (DIDs) v1.0](https://www.w3.org/TR/did-1.0/), W3C Recommendation 19 July 2022
 - Verifiable data registry: the `bio-did-registry` Solana program
 - Program ID: `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6` (live on Solana devnet)
@@ -176,7 +177,9 @@ verification method carries exactly one verification material property.
 > interoperable with pre-standard round-3 Dilithium5 implementations.
 > Its JWK mapping follows draft-ietf-cose-dilithium (`kty: "AKP"`) and MUST
 > be treated as provisional until the IETF registration is final. ML-DSA
-> keys cannot act as on-chain update authorities (see Section 6.3).
+> keys cannot act as on-chain update authorities, and because they exceed
+> the size of one transaction they are registered through a key buffer
+> (see Section 6.3).
 
 ### 5.3 Verification relationships
 
@@ -363,6 +366,45 @@ borsh-encoded `{did_account, subject, version}`. Accounts are exactly sized on e
 via `realloc`: growth is paid by the transaction's payer, and shrinkage
 refunds rent to the payer. A DID without a registry entry has no update
 operations - `initialize` must be executed first.
+
+**Large keys.** A Solana transaction holds at most 1232 bytes, so a 2592 byte
+ML-DSA-87 public key cannot be passed to `add_verification_method`. A key
+that does not fit in one transaction is staged in a *key buffer*: a
+program-owned account at PDA `["bio-did-key", did_account, authority]`
+carrying the discriminator `sha256("account:KeyBuffer")[..8]` (bytes
+`96 8a 2c 23 ff 9f 2d 00`) and this layout:
+
+| Offset | Field |
+|---|---|
+| 0 | discriminator (8 bytes) |
+| 8 | `did_account` (32 bytes) |
+| 40 | `authority` (32 bytes) |
+| 72 | `bump` (u8) |
+| 73 | `method_type` (u8) |
+| 74 | `flags` (u16 LE) |
+| 76 | `key_len` (u32 LE), fixed at creation |
+| 80 | `written` (u32 LE), bytes received so far, always a prefix |
+| 84 | `fragment_len` (u32 LE) |
+| 88 | `fragment` (32 bytes, zero padded) |
+| 120 | key bytes (`key_len`) |
+
+Four instructions drive it:
+
+| Instruction | Effect | Constraints |
+|---|---|---|
+| `create_key_buffer(fragment, method_type, flags, key_len)` | Open a buffer for one pending method | authority required; every `add_verification_method` rule that does not need the key bytes is enforced now (fragment syntax and uniqueness, flag/type rules, key length for the type, method limit); `PROTECTED` requires `key_len` 32; one buffer per authority and DID at a time |
+| `write_key_buffer(offset, chunk)` | Append key bytes | `offset` MUST equal `written` and `offset + len(chunk)` MUST NOT exceed `key_len` (`InvalidKeyChunk`); only the bound authority may write |
+| `add_verification_method_from_buffer()` | Append the buffered method and close the buffer | the buffer MUST be complete (`KeyBufferIncomplete`) and bound to this DID and authority (`InvalidKeyBuffer`); every `add_verification_method` rule is re-checked against the DID's current state; the buffer's rent is refunded to the payer |
+| `close_key_buffer()` | Discard a buffer and refund its rent | only the bound authority; the DID account is not involved, so a buffer can be reclaimed after deactivation or after the authority was rotated out |
+
+Clients SHOULD write chunks of at most 900 bytes, which keeps every
+`write_key_buffer` transaction under the limit even when the fee payer is
+not the authority; an ML-DSA-87 key then takes three chunks and five
+transactions in total, and an interrupted upload resumes from `written`. A
+key buffer holds no document state: resolution (Section 6.2) never reads
+one, `add_verification_method_from_buffer` is the only path from a buffer
+into a document, and a buffer whose preconditions no longer hold simply
+fails to finish and can be closed.
 
 ### 6.4 Deactivate
 
@@ -573,12 +615,13 @@ Reference implementation components:
   `no_std`, zero allocation, in-place account editing; instructions per
   Section 6; program ID `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6`,
   deployed on Solana devnet.
-- **Resolver** (`clients/resolver` in
-  <https://github.com/ekayana-labs/bio-did-registry>): Rust CLI driving
-  `did-bio-core` against live clusters, including generative fallback and
-  resolution metadata. Parity tests pin the program's constants,
-  discriminator, PDA derivation, and account serialization to the core
-  library.
+- **Resolver** (<https://github.com/ekayana-labs/bio-did-resolver>): the
+  `bio-did-resolver` Rust CLI driving `did-bio-core` against live clusters,
+  including generative fallback and resolution metadata, and issuing every
+  registry instruction, with the chunked upload of large keys (Section 6.3)
+  behind a single `add-key` command. Parity tests pin the program's
+  constants, discriminators, PDA derivations, and account serialization to
+  the core library.
 - **Tests** (`program/tests` in the registry repository): LiteSVM
   integration tests covering the full lifecycle, every authorization
   invariant, byte-exact golden vectors for the account layout, and a
