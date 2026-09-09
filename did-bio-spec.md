@@ -1,8 +1,9 @@
-# The `did:bio` DID Method Specification v1.0
+# The `did:bio` DID Method Specification v1.1
 
 **A W3C DID 1.0 conformant DID method for biological research data, anchored on the Solana blockchain.**
 
 - Latest editor's draft: this document
+- Changes since v1.0: key buffers for verification keys larger than one transaction (Section 6.3)
 - Conforms to: [Decentralized Identifiers (DIDs) v1.0](https://www.w3.org/TR/did-1.0/), W3C Recommendation 19 July 2022
 - Verifiable data registry: the `bio-did-registry` Solana program
 - Program ID: `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6` (live on Solana devnet)
