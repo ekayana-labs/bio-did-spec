@@ -614,12 +614,13 @@ Reference implementation components:
   `no_std`, zero allocation, in-place account editing; instructions per
   Section 6; program ID `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6`,
   deployed on Solana devnet.
-- **Resolver** (`clients/resolver` in
-  <https://github.com/ekayana-labs/bio-did-registry>): Rust CLI driving
-  `did-bio-core` against live clusters, including generative fallback and
-  resolution metadata. Parity tests pin the program's constants,
-  discriminator, PDA derivation, and account serialization to the core
-  library.
+- **Resolver** (<https://github.com/ekayana-labs/bio-did-resolver>): the
+  `bio-did-resolver` Rust CLI driving `did-bio-core` against live clusters,
+  including generative fallback and resolution metadata, and issuing every
+  registry instruction, with the chunked upload of large keys (Section 6.3)
+  behind a single `add-key` command. Parity tests pin the program's
+  constants, discriminators, PDA derivations, and account serialization to
+  the core library.
 - **Tests** (`program/tests` in the registry repository): LiteSVM
   integration tests covering the full lifecycle, every authorization
   invariant, byte-exact golden vectors for the account layout, and a
