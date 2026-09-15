@@ -24,6 +24,9 @@ as its verifiable data registry.
 - **Sponsored creation** - account initialization is permissionless and
   grants the payer no control, so platforms can pay fees while researchers
   keep sole authority.
+- **Owned subjects** - a wallet creates a DID for a dataset, paper or claim
+  with one signature: the subject is a program-derived address bound to the
+  signer, who controls and pays for it, and no per-asset key ever exists.
 - **Permanent deactivation** - a rent-refunding on-chain tombstone; the
   registry can never revert a deactivated DID to its generative state
   (unlike close-account designs).
