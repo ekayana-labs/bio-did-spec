@@ -1,8 +1,9 @@
-# The `did:bio` DID Method Specification v1.2
+# The `did:bio` DID Method Specification v1.3
 
 **A W3C DID 1.0 conformant DID method for biological research data, anchored on the Solana blockchain.**
 
 - Latest editor's draft: this document
+- Changes since v1.2: update authority through native controllers and programs, `update_service`, key and flag rules, strict account decoding (Sections 5.2, 5.3, 6, 6.2, 6.3, 7)
 - Changes since v1.1: owned subjects, program derived identifiers created and controlled by a wallet (Sections 4.2, 6.1, 6.2)
 - Changes since v1.0: key buffers for verification keys larger than one transaction (Section 6.3)
 - Conforms to: [Decentralized Identifiers (DIDs) v1.0](https://www.w3.org/TR/did-1.0/), W3C Recommendation 19 July 2022
@@ -105,7 +106,8 @@ takes one of two forms:
 - An **owned subject**: a program derived address computed by the registry
   program as
   `find_program_address(["bio-did-owned", authority, nonce_le], PROGRAM_ID)`,
-  where `authority` is the 32-byte Ed25519 key that signed the
+  where `authority` is the 32-byte Ed25519 key or program address
+  (Section 6) that signed the
   `initialize_owned(nonce)` instruction and `nonce_le` is a 64-bit
   little-endian integer chosen by that authority. program derived addresses
   are by construction not points on the Ed25519 curve, so no keypair exists
@@ -198,6 +200,14 @@ The `Multikey` encodings follow Controlled Identifiers v1.0 Section 2.2.2 (the
 multibase `z` header plus the multicodec varint for the key type). Each
 verification method carries exactly one verification material property.
 
+The registry program refuses key bytes that cannot be a public key of the
+method's type with `InvalidKey`. An `Ed25519` key has to decode to a point
+on the Ed25519 curve, unless it is the authority signing the instruction
+that adds it. That exception is how a program address becomes an update
+authority (Section 6). A `Secp256k1` key has to be a compressed SEC1 point,
+whose first byte is `0x02` or `0x03`. These rules apply from v1.3, and a key
+stored before v1.3 is still materialized as stored.
+
 > **Experimental:** the `Dilithium5` type carries an ML-DSA-87
 > ([FIPS 204]) public key for post-quantum signatures verified off-chain -
 > the parameter set derived from CRYSTALS-Dilithium5, from which the
@@ -224,9 +234,19 @@ relationship array whose bit is set:
 | 1 << 4 | `CAPABILITY_DELEGATION` | `capabilityDelegation` |
 | 1 << 8 | `PROTECTED` | - (method-internal, not expressed in the document) |
 
-Type constraints enforced by the registry program: `CAPABILITY_INVOCATION`
-may only be set on `Ed25519` methods (on-chain control requires an Ed25519
-transaction signature); `X25519` methods may carry only `KEY_AGREEMENT`.
+The registry program enforces these type constraints.
+
+- `CAPABILITY_INVOCATION` may only be set on `Ed25519` methods, because
+  on-chain control requires an Ed25519 transaction signature.
+- `PROTECTED` requires `CAPABILITY_INVOCATION`. Only a protected method's
+  own key may change it (Section 6), so that key has to be an update
+  authority.
+- `X25519` methods may carry only `KEY_AGREEMENT`.
+- `Dilithium5` methods may not carry `KEY_AGREEMENT`, because ML-DSA-87 is
+  a signature algorithm.
+
+The `PROTECTED` and `Dilithium5` rules apply from v1.3. A method stored
+before v1.3 that breaks them is still materialized as stored.
 
 ### 5.4 Services
 
@@ -254,7 +274,8 @@ platform (informative):
 strings of other methods) are included verbatim in the document's
 `controller` array. The registry program rejects `did:bio:` strings in
 `other_controllers` (they must use the native form) and rejects
-self-reference.
+self-reference. The update authorities of a native controller may update
+the DID (Section 6).
 
 ### 5.6 Example: generative DID document
 
@@ -297,11 +318,14 @@ All state-changing operations are instructions of the `bio-did-registry`
 Solana program executed in Solana transactions.
 
 **Authorization.** Every Update and Deactivate operation MUST be authorized
-by an Ed25519 signature, verified by the Solana runtime, from a key that is
+by a signature, verified by the Solana runtime, from an update
+authority. An update authority of a DID is a key that is
 listed in the DID's current verification methods with the
 `CAPABILITY_INVOCATION` flag (for a key-based DID without a registry entry,
 the subject key is implicitly the sole such key; an owned DID has no
-authority until `initialize_owned` records its creator's key). This is the complete authorization
+authority until `initialize_owned` records its creator's key). An update
+authority of one of the DID's native controllers may also sign, as
+described below. This is the complete authorization
 rule; the transaction fee payer is *not* required to be an authority, which
 enables sponsored operations (a platform pays fees while only the researcher
 key authorizes). Two program-enforced invariants protect authority
@@ -314,6 +338,30 @@ integrity:
 2. **Protected methods:** a verification method whose `PROTECTED` flag is set
    can only be added, re-flagged, or removed in a transaction signed by that
    method's own key. The subject's `#default` method is created protected.
+
+A native controller (Section 5.5) is another `did:bio` DID, and its update
+authorities may update the DIDs that list it. The transaction passes the
+controller's registry account as the account after the instruction's own
+accounts. The program accepts the signature when that account is the
+registry account of a subject in the DID's `native_controllers`, the
+controller is not deactivated, and the signer is one of the controller's
+own update authorities. Otherwise the operation fails with `Unauthorized`.
+Authority reaches one level, so the controllers of a controller gain
+nothing over the DID. Both invariants still hold. The last-authority
+invariant counts only the DID's own methods, so a DID always keeps an
+update authority of its own, and a protected method still changes only
+under its own key. Entries in `other_controllers` grant no on-chain
+authority.
+
+An update authority may also be a program. A program derived address has
+no private key, and the program it is derived from signs for it through a
+cross-program invocation (CPI), the way a multisig or a DAO vault does.
+Such an address is off the Ed25519 curve, so the registry adds it as an
+`Ed25519` method only when it signs the adding instruction itself
+(Section 5.2). A program therefore creates an owned DID with
+`initialize_owned`, which records its address as the `#default` method.
+Through CPI it then acts on that DID and on every DID that lists that DID
+as a native controller.
 
 ### 6.1 Create
 
@@ -370,7 +418,15 @@ Given a conformant `did:bio` DID:
    materialize.
 7. Verify the 8-byte account discriminator - `sha256("account:DidAccount")[..8]`,
    i.e. the bytes `4d 58 ef 8d fb 1d ed f3` - and deserialize the
-   `DidAccount` state.
+   `DidAccount` state. Account data that the program never writes is
+   undecodable, and resolution then returns error `internalError` and never
+   falls back to the generative document. Undecodable data includes bytes
+   past the state, more entries than the limits of Section 6.3, a fragment,
+   service value or external controller outside its form, unknown flag
+   bits, `CAPABILITY_INVOCATION` on a method that is not `Ed25519`, an
+   `X25519` method outside `KEY_AGREEMENT`, a key whose length does not
+   match its type, a fragment used twice, and a deactivated account that
+   still holds entries.
 8. If `deactivated` is true: return the deactivated document (Section 5.7) with
    `deactivated: true` and `versionId` from the stored version.
 9. Otherwise materialize the DID document per Section 5 and return it with
@@ -400,11 +456,12 @@ state. The instruction set is the complete update surface:
 
 | Instruction | Effect | Constraints |
 |---|---|---|
-| `add_verification_method(vm)` | Append a verification method | fragment `[A-Za-z0-9_-]{1,32}`, unique; key length must match type; flag/type constraints of Section 5.3; `PROTECTED` only self-grantable; <= 16 methods |
+| `add_verification_method(vm)` | Append a verification method | fragment `[A-Za-z0-9_-]{1,32}`, unique; key length and form must match type (Section 5.2); flag/type constraints of Section 5.3; `PROTECTED` only self-grantable; <= 16 methods |
 | `remove_verification_method(fragment)` | Remove a method | protected => own-key only; last-authority invariant |
 | `set_verification_method_flags(fragment, flags)` | Replace a method's flags | same constraints; touching `PROTECTED` (set or unset, or re-flagging a protected method) => own-key only; last-authority invariant |
 | `add_service(service)` | Append a service | fragment rules as above; type <= 64 chars, endpoint <= 512 chars, printable non-whitespace ASCII (0x21-0x7E); <= 16 services |
 | `remove_service(fragment)` | Remove a service | - |
+| `update_service(service)` | Replace a service's type and endpoint in place | the fragment must name an existing service (`ServiceNotFound`); type and endpoint rules as for `add_service` |
 | `set_controllers(native, other)` | Replace both controller sets | <= 8 + 8 entries, no duplicates, no self-reference; `other` entries <= 128 chars, printable non-whitespace ASCII (0x21-0x7E), `did:`-prefixed and non-`did:bio` |
 
 Each successful update increments `version`, sets `updated_at`, and emits a
@@ -500,8 +557,9 @@ is possible for a malicious or lagging RPC node; the monotonic `version`
 counter plus `finalized` commitment bound this attack, and multi-provider
 cross-checking detects it.
 
-**Message insertion.** Only holders of capabilityInvocation keys can insert
-state, enforced by runtime signature verification; the PDA cannot be written
+**Message insertion.** Only holders of capabilityInvocation keys of the DID
+or of its native controllers can insert state, enforced by runtime
+signature verification; the PDA cannot be written
 by any other program or user because program derived addresses have no
 private key and the Solana runtime restricts data writes to the owning
 program. A forged "registry account" at a different address fails resolution
@@ -526,7 +584,7 @@ suspicious (version regression).
 
 **Modification.** Unauthorized state modification requires either forging an
 Ed25519 signature, subverting Solana consensus, or exploiting a program bug.
-The program is intentionally small (13 instructions, no CPI into untrusted
+The program is intentionally small (14 instructions, no CPI into untrusted
 programs, checked arithmetic, exact size reallocation) and its full source
 is published for review in the reference implementation repository
 (Section 9). Response modification by an RPC
@@ -584,6 +642,16 @@ documented residual risk.
   the off-chain remediation is deactivation via the still-protected default
   key if retained, or issuing a new DID and updating off-chain linkages
   (Dataverse records, UCAN issuers).
+- A native controller's update authorities can make every change the DID's
+  own authorities can, deactivation included, under the same invariants.
+  Compromise of a controller's key therefore reaches every DID that lists
+  the controller. Controllers SHOULD be held to the same key hygiene as the
+  DIDs they control, and rotating a controller's keys reaches all of those
+  DIDs at once.
+- An update authority that is a program address answers to that program's
+  code and to whoever can upgrade it. Verifiers SHOULD check such a program
+  and its upgrade authority before relying on a DID it controls, as they
+  check the registry program itself.
 - *Pre-registration compromise:* compromise of a subject key before
   `initialize` is equivalent to full compromise, since the generative
   document grants that key everything. Key hygiene at generation time is
