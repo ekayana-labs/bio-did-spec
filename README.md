@@ -41,8 +41,9 @@ as its verifiable data registry.
   LiteSVM test suite
 - [`did-bio-core`](https://github.com/ekayana-labs/did-bio-core) - transport free
   Rust resolver library implementing this specification
-- [`bio-did-registry`](https://github.com/ekayana-labs/bio-did-registry) - the
-  `bio-did-resolver` CLI for resolving and updating DIDs on live cluster
+- [`bio-did-resolver`](https://github.com/ekayana-labs/bio-did-resolver) - the
+  `bio-did-resolver` CLI for resolving and updating DIDs on live clusters
+
 ## License
 
 [MIT](LICENSE)
