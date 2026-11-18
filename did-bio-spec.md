@@ -310,3 +310,218 @@ A deactivated DID resolves to the minimal document
 `{"@context": [...], "id": "<did>"}` together with
 `didDocumentMetadata.deactivated = true`. Deactivation in this method is
 **permanent** (see Section 6.4).
+
+## 6. Method Operations
+
+All state changing operations are instructions of the `bio-did-registry`
+Solana program executed in Solana transactions.
+
+**Authorization.** Every Update and Deactivate operation MUST be authorized
+by a signature from an update authority, verified by the Solana runtime. An
+update authority of a DID is a key listed in the DID's current verification
+methods with the `CAPABILITY_INVOCATION` flag. For a key-based DID without a
+registry entry, the subject key is implicitly the sole such key. An owned
+DID has no authority until `initialize_owned` records its creator's key. An
+update authority of one of the DID's native controllers may also sign, as
+described below. This is the complete authorization rule. The transaction
+fee payer is *not* required to be an authority, which enables sponsored
+operations (a platform pays fees while only the researcher
+key authorizes). Two program-enforced invariants protect authority
+integrity:
+
+1. **Last authority invariant:** an operation that would leave the DID with
+   zero `Ed25519`+`CAPABILITY_INVOCATION` verification methods is rejected
+   (`LastAuthority`). Relinquishing control is only possible through
+   Deactivate.
+2. **Protected methods:** a verification method whose `PROTECTED` flag is set
+   can only be added, re-flagged, or removed in a transaction signed by that
+   method's own key. The subject's `#default` method is created protected.
+
+A native controller (Section 5.5) is another `did:bio` DID, and its update
+authorities may update the DIDs that list it. The transaction passes the
+controller's registry account as the account after the instruction's own
+accounts. The program accepts the signature when that account is the
+registry account of a subject in the DID's `native_controllers`, the
+controller is not deactivated, and the signer is one of the controller's
+own update authorities. Otherwise the operation fails with `Unauthorized`.
+Authority reaches one level, so the controllers of a controller gain
+nothing over the DID. Both invariants still hold. The last authority
+invariant counts only the DID's own methods, so a DID always keeps an
+update authority of its own, and a protected method still changes only
+under its own key. Entries in `other_controllers` grant no on-chain
+authority.
+
+An update authority may also be a program. A program derived address has
+no private key, and the program it is derived from signs for it through a
+cross program invocation (CPI), the way a multisig or a DAO vault does.
+Such an address is off the Ed25519 curve, so the registry adds it as an
+`Ed25519` method only when it signs the adding instruction itself
+(Section 5.2). A program creates an owned DID with `initialize_owned`,
+which records its address as the `#default` method. Through CPI it acts on that DID and on every DID that lists that DID
+as a native controller.
+
+### 6.1 Create
+
+Three forms:
+
+- **Generative (free, offline):** generate an Ed25519 keypair. The DID
+  `did:bio[:<network>]:<base58(pubkey)>` exists immediately and resolves to
+  the generative document of Section 5.6. No transaction, fee, or network
+  interaction is required.
+- **Registered:** invoke the `initialize(subject)` instruction, which creates
+  the account at PDA `["bio-did", subject]` (124 bytes) holding exactly the
+  generative default state: version 1, the `#default` protected verification
+  method carrying all five relationships, and empty controller/service sets.
+  `initialize` is **permissionless**: any payer may fund it. This is safe
+  because the created content is byte-for-byte the generative document, so
+  a third party initializer gains no authority (all later mutations require
+  the subject key's signature). Rent for the initial account is ~0.00175 SOL
+  (rent refunds are described in Section 6.4). The transaction fee is 5000
+  lamports per signature.
+- **Owned:** invoke `initialize_owned(nonce)` with accounts `[payer,
+  authority, did_account, system_program]`. The program derives the owned
+  subject of Section 4.2 from the signing `authority` and `nonce`, creates
+  the account at PDA `["bio-did", subject]` (124 bytes) holding version 1,
+  the `#default` protected verification method with the **authority's**
+  Ed25519 key carrying all five relationships, and empty controller/service
+  sets. The authority's signature is REQUIRED. The payer MAY be a different
+  account (sponsored creation) and, as with `initialize`, gains no
+  authority. Creation fails if the account already exists, and a
+  deactivated owned DID can never be re-created (Section 6.4). From version
+  1 on, an owned DID is updated like a key based one (Section 6.3). The
+  authority may rotate its key in and out of the document
+  under the same protected method and last authority rules.
+
+### 6.2 Read (Resolve)
+
+Given a conformant `did:bio` DID:
+
+1. Validate against the ABNF of Section 4.1. On failure, return error `invalidDid`.
+2. Select the cluster from the `network` segment (absent -> mainnet-beta).
+3. Base58-decode `idstring` to the 32-byte subject. If it does not decode
+   to exactly 32 bytes, return `invalidDid`. Determine the subject form:
+   a **key subject** if the bytes decompress to a valid Ed25519 curve point,
+   an **owned subject** otherwise (Section 4.2).
+4. Compute the PDA: `find_program_address(["bio-did", subject], `
+   `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6)`.
+5. Fetch the account at that address (`getAccountInfo`). Resolvers SHOULD use
+   `finalized` commitment. Resolvers MAY use `confirmed` when staleness of up
+   to one slot rollback is acceptable.
+6. If no account exists, the account has no data, or the account is not owned
+   by the program: for a key subject return the **generative document**
+   (Section 5.6) with `didDocumentMetadata` containing `versionId: "0"` and
+   `deactivated: false`. For an owned subject, return error `notFound`, since
+   no keypair can stand behind such a subject and there is nothing to
+   materialize.
+7. Verify the 8-byte account discriminator `sha256("account:DidAccount")[..8]`
+   (bytes `4d 58 ef 8d fb 1d ed f3`) and deserialize the `DidAccount` state.
+   Account data that the program never writes is undecodable. Resolution
+   then returns error `internalError` and never falls back to the generative
+   document. Undecodable data includes bytes
+   past the state, more entries than the limits of Section 6.3, a fragment,
+   service value or external controller outside its form, unknown flag
+   bits, `CAPABILITY_INVOCATION` on a method that is not `Ed25519`, an
+   `X25519` method outside `KEY_AGREEMENT`, a key whose length does not
+   match its type, a fragment used twice, and a deactivated account that
+   still holds entries.
+8. If `deactivated` is true: return the deactivated document (Section 5.7) with
+   `deactivated: true` and `versionId` from the stored version.
+9. Otherwise materialize the DID document per Section 5 and return it with
+   `didDocumentMetadata.versionId = <version as decimal string>` and
+   `didDocumentMetadata.updated = <updated_at as XML datetime>`.
+
+**Authenticity of the response.** Registry state is authenticated by Solana
+consensus: state at a PDA of this program can only be written by the program
+itself (PDAs have no private key, and the runtime restricts data writes to
+the owning program), and the program only mutates state under the
+authorization rule above. A lamport only account that a third party creates
+at the PDA by transferring lamports to it is system-owned and carries no
+data, so it fails the step 6 ownership check and resolves generatively (or
+to `notFound` for an owned subject). A resolver's trust in a
+*particular RPC response* is bounded by its connection to honest, synced RPC
+nodes. Resolvers MUST verify account ownership and the discriminator (steps
+6-7). Resolvers SHOULD pin TLS to trusted RPC providers or query multiple
+independent providers and compare. High assurance deployments MAY run their own validator or consume consensus proofs. The
+monotonic `version` counter allows detection of stale reads across repeated
+resolutions. See Section 7 for the withholding attack.
+
+### 6.3 Update
+
+An update is any authorized instruction that changes the stored document
+state. The instruction set is the complete update surface:
+
+| Instruction | Effect | Constraints |
+|---|---|---|
+| `add_verification_method(vm)` | Append a verification method | Fragment `[A-Za-z0-9_-]{1,32}`, unique. Key length and form must match type (Section 5.2). Flag/type constraints of Section 5.3. `PROTECTED` only self-grantable. <= 16 methods. |
+| `remove_verification_method(fragment)` | Remove a method | Protected => own-key only. Last authority invariant. |
+| `set_verification_method_flags(fragment, flags)` | Replace a method's flags | Same constraints. Touching `PROTECTED` (set or unset, or re-flagging a protected method) => own key only. Last authority invariant. |
+| `add_service(service)` | Append a service | Fragment rules as above. Type <= 64 chars, endpoint <= 512 chars, printable non-whitespace ASCII (0x21-0x7E). <= 16 services. |
+| `remove_service(fragment)` | Remove a service | - |
+| `update_service(service)` | Replace a service's type and endpoint in place | The fragment must name an existing service (`ServiceNotFound`). Type and endpoint rules as for `add_service`. |
+| `set_controllers(native, other)` | Replace both controller sets | <= 8 + 8 entries, no duplicates, no self reference. `other` entries <= 128 chars, printable non-whitespace ASCII (0x21-0x7E), `did:`-prefixed and non-`did:bio`. |
+
+Each successful update increments `version`, sets `updated_at`, and emits a
+`DidModified` event to the transaction log via `sol_log_data`: an 8-byte
+event discriminator (`sha256("event:DidModified")[..8]`) followed by the
+borsh encoded `{did_account, subject, version}`. Accounts are resized
+exactly on every mutation via `realloc`. The transaction's payer funds
+growth and receives the rent refund on shrinkage. A DID without a registry
+entry has no update operations. `initialize` or `initialize_owned` must run
+first.
+
+**Large keys.** A Solana transaction holds at most 1232 bytes, so a 2592 byte
+ML-DSA-87 public key cannot be passed to `add_verification_method`. A key
+that does not fit in one transaction is staged in a *key buffer*: a
+program owned account at PDA `["bio-did-key", did_account, authority]`
+carrying the discriminator `sha256("account:KeyBuffer")[..8]` (bytes
+`96 8a 2c 23 ff 9f 2d 00`) and this layout:
+
+| Offset | Field |
+|---|---|
+| 0 | discriminator (8 bytes) |
+| 8 | `did_account` (32 bytes) |
+| 40 | `authority` (32 bytes) |
+| 72 | `bump` (u8) |
+| 73 | `method_type` (u8) |
+| 74 | `flags` (u16 LE) |
+| 76 | `key_len` (u32 LE), fixed at creation |
+| 80 | `written` (u32 LE), bytes received so far, always a prefix |
+| 84 | `fragment_len` (u32 LE) |
+| 88 | `fragment` (32 bytes, zero padded) |
+| 120 | key bytes (`key_len`) |
+
+Four instructions drive it:
+
+| Instruction | Effect | Constraints |
+|---|---|---|
+| `create_key_buffer(fragment, method_type, flags, key_len)` | Open a buffer for one pending method | Authority required. Every `add_verification_method` rule that does not need the key bytes is enforced now (fragment syntax and uniqueness, flag/type rules, key length for the type, method limit). `PROTECTED` requires `key_len` 32. One buffer per authority and DID at a time. |
+| `write_key_buffer(offset, chunk)` | Append key bytes | `offset` MUST equal `written` and `offset + len(chunk)` MUST NOT exceed `key_len` (`InvalidKeyChunk`). Only the bound authority may write. |
+| `add_verification_method_from_buffer()` | Append the buffered method and close the buffer | The buffer MUST be complete (`KeyBufferIncomplete`) and bound to this DID and authority (`InvalidKeyBuffer`). Every `add_verification_method` rule is re-checked against the DID's current state. The buffer's rent is refunded to the payer. |
+| `close_key_buffer()` | Discard a buffer and refund its rent | Only the bound authority. The DID account is not involved, so a buffer can be reclaimed after deactivation or after the authority was rotated out. |
+
+Clients SHOULD write chunks of at most 900 bytes, which keeps every
+`write_key_buffer` transaction under the limit even when the fee payer is
+not the authority. An ML-DSA-87 key then takes three chunks and five
+transactions in total. An interrupted upload resumes from `written`. A key
+buffer holds no document state. Resolution (Section 6.2) never reads one,
+`add_verification_method_from_buffer` is the only path from a buffer into a
+document, and a buffer whose preconditions no longer hold fails to finish
+and can be closed.
+
+### 6.4 Deactivate
+
+The `deactivate()` instruction permanently deactivates the DID: all
+verification methods, services, and controllers are erased, the account is
+shrunk to a 74-byte tombstone whose `deactivated` flag is true, and excess
+rent is refunded to the payer. The tombstone is retained forever and the
+program rejects every subsequent mutation of it with `DidDeactivated`.
+
+Deactivation in `did:bio` is **not** implemented by closing the account. A
+closed account would make the DID resolve to its generative document again
+and restore the subject key's authority, which is unacceptable if key
+compromise prompted the deactivation. The tombstone guarantees that, once
+deactivated, the registry state can never again contain verification
+material for the DID, and every honest, synced view of the chain resolves
+it as deactivated. Section 7 analyzes the remaining read path exposure,
+where an RPC node withholds the tombstone so that a resolver falls back to
+the generative document.
