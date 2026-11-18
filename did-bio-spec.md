@@ -774,3 +774,44 @@ Entry to be submitted to `w3c/did-extensions` as `methods/bio.json`:
 - [FIPS-204] Module Lattice Based Digital Signature Standard (ML-DSA). NIST, 2024.
 - [COSE-DILITHIUM] draft-ietf-cose-dilithium (ML-DSA in JOSE/COSE, `kty: AKP`).
 - Solana documentation: accounts, PDAs, rent. https://solana.com/docs/core/accounts
+
+## Appendix A. Diagrams (informative)
+
+### A.1 Resolution algorithm (Section 6.2)
+
+```mermaid
+flowchart TD
+    A["Parse DID against ABNF (Section 4.1)"] -->|invalid| E["error: invalidDid"]
+    A -->|valid| B["Select cluster from network segment<br/>(absent = mainnet-beta)"]
+    B --> C["Base58-decode idstring to 32-byte subject key"]
+    C -->|not 32 bytes| E
+    C --> D["Derive PDA: seeds 'bio-did' + subject,<br/>program H1gnV4Gj...3Xxy6"]
+    D --> F["getAccountInfo at finalized commitment"]
+    F -->|"no account, empty, or wrong owner<br/>and subject on the curve (key subject)"| G["Generative DID document<br/>versionId = 0, deactivated = false"]
+    F -->|"no account, empty, or wrong owner<br/>and subject off the curve (owned subject)"| N["error: notFound"]
+    F -->|account found| H["Verify discriminator,<br/>deserialize DidAccount"]
+    H -->|deactivated = true| I["Deactivated document<br/>didDocumentMetadata.deactivated = true"]
+    H -->|active| J["Materialize DID document (Section 5)<br/>versionId = version, updated = updated_at"]
+```
+
+### A.2 DID lifecycle (Section 6)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Generative : Ed25519 keypair generated (free, offline)
+    Generative --> Registered : initialize(subject), permissionless, sponsored
+    [*] --> Registered : initialize_owned(nonce), authority signs, subject derived
+    Registered --> Registered : authorized updates<br/>(verification methods, services, controllers)
+    Registered --> Deactivated : deactivate(), authority required
+    Deactivated --> Deactivated : all mutations rejected (tombstone)
+```
+
+### A.3 Trust chain (informative)
+
+```mermaid
+flowchart LR
+    K["Controller keypair<br/>(Ed25519)"] -->|signs transactions| P["bio-did-registry program<br/>(authorization + invariants)"]
+    P -->|writes| S["DidAccount PDA<br/>(consensus-verified state)"]
+    S -->|materializes| DOC["W3C DID document"]
+    DOC -->|"#metadata service (ipfs://CID)"| M["Research metadata<br/>(content-addressed)"]
+```
