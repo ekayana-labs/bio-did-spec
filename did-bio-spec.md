@@ -525,3 +525,196 @@ material for the DID, and every honest, synced view of the chain resolves
 it as deactivated. Section 7 analyzes the remaining read path exposure,
 where an RPC node withholds the tombstone so that a resolver falls back to
 the generative document.
+
+## 7. Security Considerations
+
+This section follows RFC 3552 and addresses each attack class required by
+DID 1.0 Section 8.3, followed by residual risks.
+
+**Integrity and update authentication.** All Create/Update/Deactivate
+operations are integrity protected end to end. The controller signs the full
+transaction message (including the instruction data and a recent blockhash)
+with Ed25519. The Solana runtime verifies the signature before execution,
+and the program enforces the capabilityInvocation authorization
+rule and the invariants of Section 6. Read operations are integrity protected to
+the extent of the resolver's RPC trust (below).
+
+**Eavesdropping.** All registry content is public by design. There is no
+confidential channel to protect. Controllers MUST NOT place confidential or
+personal data in verification methods, service endpoints, or controller
+strings (see Section 8). Resolvers SHOULD use TLS to RPC endpoints so that
+*query patterns* (who resolves which DID, when) are not trivially observable
+to path adversaries.
+
+**Replay.** Write replay is prevented by Solana's transaction uniqueness
+rules: a transaction embeds a recent blockhash and the network rejects
+duplicates and expired blockhashes, so a captured `add_verification_method`
+transaction cannot be re-executed later. Read replay (serving stale state)
+is possible for a malicious or lagging RPC node. The monotonic `version`
+counter and `finalized` commitment bound this attack, and multi provider
+cross checking detects it.
+
+**Message insertion.** Only holders of capabilityInvocation keys of the DID
+or of its native controllers can insert state, enforced by runtime
+signature verification. No other program or user can write the PDA,
+because program derived addresses have no private key and the Solana runtime restricts data writes to the owning
+program. A forged "registry account" at a different address fails resolution
+step 4 (address mismatch) or steps 6-7 (ownership/discriminator checks).
+
+**Deletion.** The program exposes no instruction that deletes a registry
+account. Deactivation leaves a permanent tombstone. Solana rent exemption
+prevents garbage collection of funded accounts. The remaining deletion like
+vector is **withholding**: an RPC node may falsely report that the registry
+account does not exist, causing a resolver to fall back to the generative
+document. This restores the subject key's original authority and hides
+rotations, added keys, and deactivation. It is the most significant
+read path risk of this method. It does not apply to owned subjects, where
+withholding yields `notFound` rather than a document anyone controls, so
+verifiers of owned DIDs see an outage, never a stale authority.
+Mitigations: resolvers MUST treat generative fallback as trustworthy only
+to the extent they trust their RPC endpoints. Security-sensitive verifiers
+SHOULD query multiple
+independent RPC providers (or operate a node) and SHOULD treat a
+generative result for a DID previously seen with `versionId > 0` as
+suspicious (version regression).
+
+**Modification.** Unauthorized state modification requires either forging an
+Ed25519 signature, subverting Solana consensus, or exploiting a program bug.
+The program is small (14 instructions, no CPI into untrusted programs,
+checked arithmetic, exact size reallocation), and its full source
+is published for review in the reference implementation repository
+(Section 9). Response modification by an RPC
+node is covered under withholding/replay above.
+
+**Denial of service.** Network level DoS resistance is inherited from Solana
+(fees, stake weighted QoS). Per-DID griefing is bounded: `initialize` is
+permissionless but can only create the default state (no attacker benefit
+beyond donating rent), and `initialize_owned` can only create subjects the
+signer itself derives. Caps (16 verification methods, 16 services, 8+8
+controllers, bounded string lengths) bound account size and resolver work.
+Resolver endpoints SHOULD rate-limit and MAY cache documents keyed by
+`(did, versionId)`. Amplification is not possible: every state changing
+request is fee bearing and reads are simple request/response with bounded
+payloads (<= ~52 KB worst case).
+
+**Man-in-the-middle.** A MITM between controller and RPC cannot alter a
+signed transaction without invalidating it and cannot forge confirmations
+beyond the withholding/stale read capabilities already described. TLS to
+RPC endpoints is RECOMMENDED for both writes and reads.
+
+**Uniqueness policy.** DID to account assignment is mechanical and
+collision-free: one PDA per (program, subject key) pair per cluster, with
+deterministic derivation (SHA-256-based) and runtime enforced single
+ownership. No human registrar exists, so no policy disputes over name
+assignment can arise.
+
+**Endpoint authentication and network topology.** Resolvers interact with
+Solana through RPC endpoints of their choice. This method inherits the trust
+topology of the chosen deployment (own validator > authenticated quorum of
+independent providers > single public endpoint). There is no light client
+proof format standardized for Solana account state at the time of writing.
+Deployments requiring stronger read authentication should co-locate a
+validator. The security characteristics of user host authentication for
+hosted resolver APIs (e.g., the Ekayaan backend's resolver endpoint) are out
+of scope of the on-chain method and documented by the hosting service.
+
+**Cryptographic agility and protected data.** On-chain control authorization
+rests on Ed25519 (Curve25519, ~128-bit classical security). The registry
+protects account state integrity (through consensus and program logic) and
+update authenticity (through transaction signatures). It does not encrypt
+anything. The experimental ML-DSA-87 verification method type provides a
+post-quantum *assertion* capability for off-chain protocols. On-chain
+control remains pre-quantum until Solana offers PQ transaction signatures.
+This is a documented residual risk.
+
+**Residual risks and key compromise recovery.**
+
+- *Sole authority key compromise:* an attacker holding the only
+  capabilityInvocation key can rotate the legitimate controller out or
+  deactivate the DID. Controllers SHOULD register a second
+  capabilityInvocation method (e.g., a hardware or organizational escrow
+  key) or use a multisig controlled subject key. Recovery after a hostile
+  rotation is not possible on-chain by design, since there is no
+  super authority. The off-chain remediation is deactivation through the
+  still protected default
+  key if retained, or issuing a new DID and updating off-chain linkages
+  (Dataverse records, UCAN issuers).
+- A native controller's update authorities can make every change the DID's
+  own authorities can, deactivation included, under the same invariants.
+  Compromise of a controller's key reaches every DID that lists
+  the controller. Controllers SHOULD be held to the same key hygiene as the
+  DIDs they control, and rotating a controller's keys reaches all of those
+  DIDs at once.
+- An update authority that is a program address answers to that program's
+  code and to whoever can upgrade it. Verifiers SHOULD check such a program
+  and its upgrade authority before relying on a DID it controls, as they
+  check the registry program itself.
+- *Pre-registration compromise:* compromise of a subject key before
+  `initialize` is equivalent to full compromise, since the generative
+  document grants that key everything. Key hygiene at generation time is
+  critical. An owned subject has no pre-registration state: its authority
+  is whatever key signed `initialize_owned`, and compromise of that key is
+  the ordinary key compromise case above.
+- *Program upgrade authority:* the reference devnet deployment, once made,
+  will be upgradeable by its deploy authority (standard for pre-production).
+  A production/mainnet deployment MUST either burn the upgrade authority
+  (`solana program set-upgrade-authority --final`) or transfer it to a
+  governance program, and verifiers SHOULD check the upgrade authority
+  before relying on the registry for high value use.
+- *Implementation bugs* in resolvers (skipping ownership/discriminator
+  checks, accepting non finalized state for high value decisions) reduce
+  the guarantees above. The reference resolver (Section 9) implements the
+  full Section 6.2 algorithm.
+
+## 8. Privacy Considerations
+
+Per DID 1.0 Section 8.4, each applicable subsection of RFC 6973 Section 5 is addressed.
+Overriding design rule: **the method never requires personal data
+on-chain, and controllers MUST NOT write any.** The
+on-chain record contains only public keys, opaque fragments, service types,
+and URIs. Rich (potentially personal) research metadata lives off-chain in
+IPFS/Dataverse, where it can be erased.
+
+- **Surveillance.** Solana is a public, permanent, timestamped ledger: every
+  update to a DID document (key rotation cadence, service changes) is
+  globally observable forever, as are fee payer relationships. Controllers
+  who consider update patterns sensitive SHOULD use per-dataset DIDs and
+  platform-sponsored fee payment (which hides the individual's wallet).
+- **Stored data compromise.** The registry stores no secrets, so registry
+  compromise adds nothing beyond public data. Off-chain: IPFS payloads
+  referenced from `BioMetadata` services SHOULD be encrypted when they
+  contain personal or pre-publication data. Key material for Dilithium/JWK
+  methods is public-key only.
+- **Unsolicited traffic.** Service endpoints published in a DID document are
+  world readable and will be crawled. Endpoints SHOULD point at
+  infrastructure prepared for unsolicited traffic (gateways, platform APIs),
+  never at personal devices or private hosts.
+- **Misattribution.** A `did:bio` DID authenticates control of a key, not a
+  real-world identity. Binding a DID to a researcher or institution happens
+  off-chain (e.g., ORCID, Dataverse records, signed claims) and carries that
+  binding's own error modes. Verifiers MUST NOT infer authorship of data
+  from bare key control.
+- **Correlation.** The subject key is a strong correlation handle: reusing
+  one key across datasets, chains, or applications links them all. The
+  platform default is one keypair per dataset DID and per-persona researcher
+  DIDs. The PDA permanently links all historical states of one DID by
+  design (auditability), so unlinkable evolution requires migrating to a
+  fresh DID.
+- **Identification.** Identifiers are pseudonymous key encodings, but
+  combining service endpoints (institutional URLs), controller graphs, and
+  update timing can deanonymize a controller. Endpoint choice SHOULD prefer
+  shared/platform hosts where researcher anonymity matters.
+- **Secondary use.** All registry data is public and will be reused beyond
+  its original purpose (indexing, analytics). Publishing through this method
+  means accepting unrestricted read access. Data minimization is
+  the only effective control.
+- **Disclosure.** DID documents disclose organizational infrastructure
+  (which IPFS clusters, which repositories an entity uses). Institutions
+  SHOULD review service entries as they would any public directory listing.
+- **Exclusion.** Subjects cannot prevent third parties from resolving their
+  DID or reading history. The only subject side control is Deactivate, which
+  permanently withdraws the document and leaves the tombstone public by
+  design. GDPR style erasure applies to the off-chain payloads (IPFS
+  unpinning, Dataverse takedown), which is why nothing personal may be
+  anchored on-chain, including content derived CIDs of *unencrypted*
+  personal data.
