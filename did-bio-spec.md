@@ -718,3 +718,59 @@ IPFS/Dataverse, where it can be erased.
   unpinning, Dataverse takedown), which is why nothing personal may be
   anchored on-chain, including content derived CIDs of *unencrypted*
   personal data.
+
+## 9. Reference Implementation
+
+Reference implementation components:
+
+- **Core library** (<https://github.com/ekayana-labs/did-bio-core>): the
+  `did-bio-core` Rust crate implementing the identifier syntax (Section 4),
+  data model (Section 5), and Section 6.2 resolution algorithm as a
+  transport free library. It includes Multikey encoding, the ML-DSA-87 JWK
+  mapping, registry account deserialization, the key/owned subject test,
+  owned subject derivation, and the generative fallback, with golden tests
+  against this specification's examples.
+- **Registry program** (<https://github.com/ekayana-labs/bio-did-registry>):
+  Rust, built on [Pinocchio](https://github.com/anza-xyz/pinocchio)
+  (`no_std`, zero allocation, in-place account editing). Instructions follow
+  Section 6. Program ID `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6`,
+  deployed on Solana devnet.
+- **Resolver** (<https://github.com/ekayana-labs/bio-did-resolver>): the
+  `bio-did-resolver` Rust CLI driving `did-bio-core` against live clusters,
+  including generative fallback and resolution metadata, and issuing every
+  registry instruction, with the chunked upload of large keys (Section 6.3)
+  behind a single `add-key` command. Parity tests pin the program's
+  constants, discriminators, PDA derivations, and account serialization to
+  the core library.
+- **Tests** (`program/tests` in the registry repository): LiteSVM
+  integration tests covering the full lifecycle, every authorization
+  invariant, byte exact golden vectors for the account layout, and a
+  per-instruction compute unit report.
+
+## 10. Registration
+
+Entry to be submitted to `w3c/did-extensions` as `methods/bio.json`:
+
+```json
+{
+  "name": "bio",
+  "status": "registered",
+  "verifiableDataRegistry": "Solana",
+  "contactName": "Ekayana Labs",
+  "contactEmail": "suraj410401@gmail.com",
+  "contactWebsite": "https://github.com/ekayana-labs/",
+  "specification": "https://github.com/ekayana-labs/did-bio-spec/blob/main/did-bio-spec.md"
+}
+```
+
+## 11. References
+
+- [DID-1.0] Decentralized Identifiers (DIDs) v1.0. W3C Recommendation, 19 July 2022. https://www.w3.org/TR/did-1.0/
+- [DID-1.1] Decentralized Identifiers (DIDs) v1.1. W3C Candidate Recommendation. https://www.w3.org/TR/did-1.1/
+- [CID-1.0] Controlled Identifiers v1.0. W3C Recommendation, 15 May 2025. https://www.w3.org/TR/cid-1.0/
+- [DID-EXTENSIONS] DID Extensions / DID Methods registry. https://www.w3.org/TR/did-extensions-methods/
+- [RFC3552] Guidelines for Writing RFC Text on Security Considerations. https://www.rfc-editor.org/rfc/rfc3552
+- [RFC6973] Privacy Considerations for Internet Protocols. https://www.rfc-editor.org/rfc/rfc6973
+- [FIPS-204] Module Lattice Based Digital Signature Standard (ML-DSA). NIST, 2024.
+- [COSE-DILITHIUM] draft-ietf-cose-dilithium (ML-DSA in JOSE/COSE, `kty: AKP`).
+- Solana documentation: accounts, PDAs, rent. https://solana.com/docs/core/accounts
