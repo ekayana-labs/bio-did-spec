@@ -167,3 +167,146 @@ be lowercase. No other normalization is defined.
 - Global uniqueness of the resulting DID follows from the uniqueness of the
   `did:bio` method name plus the uniqueness of the method-specific-id within
   the method.
+
+## 5. DID Documents
+
+### 5.1 Representation and contexts
+
+Resolvers MUST support the JSON-LD representation
+(`application/did+ld+json`) and SHOULD also serve plain JSON
+(`application/did+json`). The JSON-LD `@context` is:
+
+```json
+["https://www.w3.org/ns/did/v1", "https://www.w3.org/ns/cid/v1"]
+```
+
+### 5.2 Verification methods
+
+Each on-chain verification method record `{fragment, method_type, flags,
+key_data}` is materialized as a verification method map with:
+
+- `id`: `<did>#<fragment>`
+- `controller`: `<did>`
+- `type` and verification material according to `method_type`:
+
+| On-chain type | Key bytes | `type` | Material | Multibase prefix |
+|---|---|---|---|---|
+| `Ed25519` | 32 | `Multikey` | `publicKeyMultibase` = base58-btc(`0xed01` || key) | `z6Mk` |
+| `X25519` | 32 | `Multikey` | `publicKeyMultibase` = base58-btc(`0xec01` || key) | `z6LS` |
+| `Secp256k1` | 33 (compressed) | `Multikey` | `publicKeyMultibase` = base58-btc(`0xe701` || key) | `zQ3s` |
+| `Dilithium5` | 2592 | `JsonWebKey` | `publicKeyJwk` = `{"kty":"AKP","alg":"ML-DSA-87","pub":"<base64url(key)>"}` | - |
+
+The `Multikey` encodings follow Controlled Identifiers v1.0 Section 2.2.2 (the
+multibase `z` header plus the multicodec varint for the key type). Each
+verification method carries exactly one verification material property.
+
+The registry program refuses key bytes that cannot be a public key of the
+method's type with `InvalidKey`. An `Ed25519` key has to decode to a point
+on the Ed25519 curve, unless it is the authority signing the instruction
+that adds it. That exception is how a program address becomes an update
+authority (Section 6). A `Secp256k1` key has to be a compressed SEC1 point,
+whose first byte is `0x02` or `0x03`. These rules apply from v1.3. A key
+stored before v1.3 is still materialized as stored.
+
+> **Experimental:** the `Dilithium5` type carries an ML-DSA-87
+> ([FIPS 204]) public key for post-quantum signatures verified off-chain.
+> ML-DSA-87 is the parameter set derived from CRYSTALS-Dilithium5, from
+> which the on-chain type takes its legacy name. Final ML-DSA-87 is **not**
+> interoperable with pre-standard round-3 Dilithium5 implementations.
+> Its JWK mapping follows draft-ietf-cose-dilithium (`kty: "AKP"`) and MUST
+> be treated as provisional until the IETF registration is final. ML-DSA
+> keys cannot act as on-chain update authorities. They exceed the size of
+> one transaction, so they are registered through a key buffer (Section 6.3).
+
+### 5.3 Verification relationships
+
+The on-chain `flags` bitmask maps to the five DID 1.0 Section 5.3 verification
+relationships. A verification method's `id` is listed (by reference) in each
+relationship array whose bit is set:
+
+| Bit | Flag | DID document property |
+|---|---|---|
+| 1 << 0 | `AUTHENTICATION` | `authentication` |
+| 1 << 1 | `ASSERTION` | `assertionMethod` |
+| 1 << 2 | `KEY_AGREEMENT` | `keyAgreement` |
+| 1 << 3 | `CAPABILITY_INVOCATION` | `capabilityInvocation` |
+| 1 << 4 | `CAPABILITY_DELEGATION` | `capabilityDelegation` |
+| 1 << 8 | `PROTECTED` | - (method-internal, not expressed in the document) |
+
+The registry program enforces these type constraints.
+
+- `CAPABILITY_INVOCATION` may only be set on `Ed25519` methods, because
+  on-chain control requires an Ed25519 transaction signature.
+- `PROTECTED` requires `CAPABILITY_INVOCATION`. Only a protected method's
+  own key may change it (Section 6), so that key has to be an update
+  authority.
+- `X25519` methods may carry only `KEY_AGREEMENT`.
+- `Dilithium5` methods may not carry `KEY_AGREEMENT`, because ML-DSA-87 is
+  a signature algorithm.
+
+The `PROTECTED` and `Dilithium5` rules apply from v1.3. A method stored
+before v1.3 that breaks them is still materialized as stored.
+
+### 5.4 Services
+
+Each on-chain service record is materialized as:
+
+```json
+{ "id": "<did>#<fragment>", "type": "<service_type>", "serviceEndpoint": "<endpoint>" }
+```
+
+Fragments are unique across verification methods *and* services, so every
+DID URL fragment is unambiguous. Conventional service types in the Ekayaan
+platform (informative):
+
+| `type` | `serviceEndpoint` | Purpose |
+|---|---|---|
+| `BioMetadata` | `ipfs://<cid>` | Extended dataset/DID metadata document on IPFS |
+| `IPFSStorage` | HTTPS gateway URL | Storage API for the DID's payloads |
+| `DataverseRepository` | `https://doi.org/<doi>` | Linked Dataverse dataset |
+| `UcanEndpoint` | HTTPS URL | UCAN capability issuance/validation endpoint |
+
+### 5.5 Controllers
+
+`native_controllers` (Solana public keys) materialize as
+`did:bio[:<network>]:<base58(key)>` entries. `other_controllers` (DID
+strings of other methods) are included verbatim in the document's
+`controller` array. The registry program rejects `did:bio:` strings in
+`other_controllers` (they must use the native form) and rejects
+self reference. The update authorities of a native controller may update
+the DID (Section 6).
+
+### 5.6 Example: generative DID document
+
+For `did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc` with no
+on-chain account:
+
+```json
+{
+  "@context": ["https://www.w3.org/ns/did/v1", "https://www.w3.org/ns/cid/v1"],
+  "id": "did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc",
+  "verificationMethod": [{
+    "id": "did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default",
+    "type": "Multikey",
+    "controller": "did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc",
+    "publicKeyMultibase": "z6MkfuN2vWAoHermh6vY6TgAJfwhBWZCApZb9XeQ9HwLqHfz"
+  }],
+  "authentication": ["did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default"],
+  "assertionMethod": ["did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default"],
+  "keyAgreement": ["did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default"],
+  "capabilityInvocation": ["did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default"],
+  "capabilityDelegation": ["did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc#default"]
+}
+```
+
+The `#default` fragment is reserved for the subject key's verification
+method. (The generative document lists the Ed25519 subject key under
+`keyAgreement` for continuity with the stored default method. Applications
+requiring X25519 key agreement should add a dedicated `X25519` method.)
+
+### 5.7 Deactivated DID documents
+
+A deactivated DID resolves to the minimal document
+`{"@context": [...], "id": "<did>"}` together with
+`didDocumentMetadata.deactivated = true`. Deactivation in this method is
+**permanent** (see Section 6.4).
