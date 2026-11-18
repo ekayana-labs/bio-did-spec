@@ -1,0 +1,169 @@
+# The `did:bio` DID Method Specification v1.3
+
+**A W3C DID 1.0 conformant DID method for biological research data, anchored on the Solana blockchain.**
+
+- Latest editor's draft: this document
+- Changes since v1.2: update authority through native controllers and programs, `update_service`, key and flag rules, strict account decoding (Sections 5.2, 5.3, 6, 6.2, 6.3, 7)
+- Changes since v1.1: owned subjects, program derived identifiers created and controlled by a wallet (Sections 4.2, 6.1, 6.2)
+- Changes since v1.0: key buffers for verification keys larger than one transaction (Section 6.3)
+- Conforms to: [Decentralized Identifiers (DIDs) v1.0](https://www.w3.org/TR/did-1.0/), W3C Recommendation 19 July 2022
+- Verifiable data registry: the `bio-did-registry` Solana program
+- Program ID: `H1gnV4GjNT3UV7AgGNUCkSaciuVVtM7hKb8JhPV3Xxy6` (live on Solana devnet)
+- Reference implementation: <https://github.com/ekayana-labs/bio-did-registry>
+
+---
+
+## 1. Abstract
+
+`did:bio` is a DID method for identifying research datasets, researchers, and
+research infrastructure in the Ekayaan / Bio-DID-Seq platform. Identifiers are
+derived from Ed25519 public keys or, for assets a wallet creates and pays for,
+from a program derived address bound to that wallet. DID documents are
+materialized from accounts owned by the `bio-did-registry` program on the
+Solana blockchain, which acts as the verifiable data registry. Every
+syntactically valid key-based `did:bio` identifier resolves. Identifiers
+without on-chain state resolve to a deterministic *generative* DID document
+containing the subject key itself, at zero cost.
+Writing an on-chain registry entry unlocks key rotation, additional
+verification methods (including an experimental post quantum ML-DSA-87 type),
+service endpoints (typically IPFS content identifiers carrying research
+metadata), and cross method controllers.
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT, RECOMMENDED, and MAY in
+this document are to be interpreted as described in
+[BCP 14](https://www.rfc-editor.org/info/bcp14)
+([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119),
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when,
+they appear in all capitals, as shown here.
+
+## 2. Conformance
+
+This specification is written against DID 1.0 Section 8 ("Methods"): Section 8.1 Method
+Syntax, Section 8.2 Method Operations, Section 8.3 Security Requirements, and Section 8.4 Privacy
+Requirements. DID documents produced by this method conform to DID 1.0 Section 4
+(Data Model) and Section 5 (Core Properties). Verification material uses the
+`Multikey` type defined by
+[Controlled Identifiers v1.0](https://www.w3.org/TR/cid-1.0/) (W3C
+Recommendation, 15 May 2025).
+
+*Forward compatibility:* DID 1.1 (Candidate Recommendation, 2026) renumbers
+the method spec requirements to Section 7 and layers the data model on
+Controlled Identifiers v1.0. The method definition requirements are
+unchanged. One representation level difference applies: DID 1.1 replaces
+the `application/did+json` / `application/did+ld+json` media types with the
+single registered type `application/did`, so resolvers targeting DID 1.1
+serve the same JSON-LD serialization as `application/did`.
+
+## 3. Method Name
+
+The namestring that identifies this DID method is: **`bio`**.
+
+A DID that uses this method MUST begin with the prefix `did:bio:`. The prefix
+MUST be in lowercase. This satisfies the `method-name` ABNF of DID 1.0 Section 3.1
+(`1*method-char`, where `method-char = %x61-7A / DIGIT`).
+
+This method defines exactly one method specific DID scheme, identified by
+exactly one method name. To reduce the chance of method name conflicts, this
+specification is to be registered in the DID Extensions registry (see
+[Section 10 Registration](#10-registration)). As of 2026-07-20 no method named
+`bio` exists among the registered methods.
+
+## 4. Method Specific Identifier
+
+### 4.1 Syntax
+
+```abnf
+bio-did      = %s"did:bio" *1(":" network) ":" idstring
+network      = %s"devnet" / %s"testnet" / %s"localnet"
+idstring     = 32*44base58char
+base58char   = %x31-39            ; 1-9
+             / %x41-48 / %x4A-4E  ; A-H J-N   (no I)
+             / %x50-5A            ; P-Z       (no O)
+             / %x61-6B / %x6D-7A  ; a-k m-z   (no l)
+```
+
+Terminals use numeric ranges and RFC 7405 case sensitive literals
+(`%s"..."`), because plain RFC 5234 quoted strings are case insensitive. The
+character set is the Bitcoin/IPFS base58 alphabet (omitting `0`, `O`, `I`,
+`l`). Matching regular expression for the full DID:
+
+```
+^did:bio(:(devnet|testnet|localnet))?:[1-9A-HJ-NP-Za-km-z]{32,44}$
+```
+
+This syntax complies with the `method-specific-id` ABNF rule of DID 1.0 Section 3.1,
+including its permission for embedded colons.
+
+### 4.2 Generation
+
+The `idstring` MUST be the base58-btc encoding of a 32-byte **subject**, which
+takes one of two forms:
+
+- A **key subject**: an Ed25519 public key, the **subject key**. Any Ed25519
+  keypair generated by the DID controller yields a valid `did:bio`
+  identifier. No registration transaction is required for the identifier
+  to exist and resolve (see [Section 6.2 Read](#62-read-resolve)).
+- An **owned subject**: a program derived address computed by the registry
+  program as
+  `find_program_address(["bio-did-owned", authority, nonce_le], PROGRAM_ID)`,
+  where `authority` is the 32-byte Ed25519 key or program address
+  (Section 6) that signed the
+  `initialize_owned(nonce)` instruction and `nonce_le` is a 64-bit
+  little endian integer chosen by that authority. Program derived addresses
+  are not points on the Ed25519 curve, so no keypair exists for an owned
+  subject. It has no generative document and exists only through the
+  registry (Section 6.1). Owned subjects give research assets
+  (datasets, papers, claims) identifiers that their creator controls and
+  pays for without anyone holding a key per asset.
+
+The two forms are distinguished by the curve test of Section 6.2 step 3: a
+subject that decodes to a valid Ed25519 curve point is a key subject,
+otherwise it is an owned subject. Resolvers MUST NOT infer an owned
+subject's authority from the identifier. Only the registry account states
+who controls it.
+
+The optional `network` segment selects the Solana cluster acting as the
+verifiable data registry:
+
+| DID form | Cluster |
+|---|---|
+| `did:bio:<idstring>` | mainnet-beta |
+| `did:bio:devnet:<idstring>` | devnet |
+| `did:bio:testnet:<idstring>` | testnet |
+| `did:bio:localnet:<idstring>` | a local validator |
+
+DIDs that differ only in their `network` segment are **distinct DIDs**
+resolved against distinct registries. No equivalence between them is implied.
+
+Example (the intended reference deployment cluster is devnet):
+
+```
+did:bio:devnet:2T6zLFvMx7NJac5qQtiKTaPhMwHLkwKETWjUK1yKv4tc
+```
+
+### 4.3 Case sensitivity and normalization
+
+The `idstring` is **case sensitive** and MUST NOT be case normalized, because
+base58 is a case sensitive encoding. The `did:bio` prefix and `network` segment MUST
+be lowercase. No other normalization is defined.
+
+### 4.4 Uniqueness
+
+- Within this method, a `method-specific-id` is unique because it is a
+  deterministic encoding of 32 bytes, scoped by the network segment. The 32
+  bytes are a point in the Ed25519 public-key space for a key subject and a
+  program derived address for an owned subject. Base58 is injective, so two
+  distinct subjects cannot encode to the same `idstring`, and the two forms
+  never overlap because a program derived address is never a curve point.
+- An owned subject is unique per `(authority, nonce)` pair: the same nonce
+  under two authorities derives two unrelated subjects, and the authority
+  MUST sign `initialize_owned`, so nobody can register an owned subject in
+  another party's name.
+- Registry-entry uniqueness is enforced mechanically by Solana: each DID maps
+  to exactly one program derived address (PDA) computed as
+  `find_program_address(["bio-did", subject_key], PROGRAM_ID)`, and the
+  runtime guarantees a single account per address (see
+  [Section 7 Security Considerations](#7-security-considerations)).
+- Global uniqueness of the resulting DID follows from the uniqueness of the
+  `did:bio` method name plus the uniqueness of the method-specific-id within
+  the method.
